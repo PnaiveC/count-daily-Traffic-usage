@@ -12,7 +12,7 @@
 - 内置帮助弹窗解释统计口径与限制；
 - 系统保留多久就查询多久，不建立本地历史数据库。
 
-可安装 APK：[DailyTraffic-0.2.0-debug.apk](dist/DailyTraffic-0.2.0-debug.apk)
+可安装 APK：[DailyTraffic-0.2.0-debug.apk](https://github.com/PnaiveC/count-daily-Traffic-usage/releases/latest)
 
 技术文档：
 
@@ -27,15 +27,13 @@
 .\gradlew.bat assembleRelease
 ```
 
-本机 SDK 已写入 `local.properties`。Release APK 输出在
-`app/build/outputs/apk/release/app-release-unsigned.apk`。
 
 本机验证：10 个 JVM 单元测试通过；Debug/Release 构建成功；API 36.1 模拟器完成
 未授权、授权后读取、网络筛选、帮助、共享 UID 逐层展开和七日趋势验证。
 
 实机验证：
-1.多台不同品牌的安卓设备实测不会崩溃、使用便捷。
-2.实测应用产生的数据以缓存形式存在，不会建立本地数据库。
+1. 多台不同品牌的安卓设备实测不会崩溃、使用便捷。
+2. 实测应用产生的数据以缓存形式存在，不会建立本地数据库。
 
 当前 Debug APK 约 961 KiB，Release APK 约 51 KiB。
 
