@@ -54,4 +54,5 @@ class AndroidNetworkStatsDataSource(context: Context) : NetworkStatsDataSource {
         }
         return totals
     }
+
 }

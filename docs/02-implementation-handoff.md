@@ -1,26 +1,27 @@
 # 每日流量 MVP 实现与交接说明
 
-版本：1.1（2026-10-17）  
+版本：1.2（2026-10-17）  
 读者：后续修复 bug、适配设备或扩展功能的开发者/代码生成代理。
 
 ## 1. 当前状态
 
-- MVP 已实现：日期切换、权限流程、设备总量、按 UID/应用明细、刷新和错误状态。
+- v0.2 已实现：日期切换、权限流程、设备总量、网络筛选、帮助、按 UID/应用明细、
+  共享 UID 的底部“其它”、逐层展开、最近 7 日趋势、刷新和错误状态。
 - 旧版长文档位于 `docs/archive/`，与当前 MVP 冲突时一律以
   `docs/01-requirements.md` 和本文为准。
-- 可安装测试包：`dist/DailyTraffic-0.1.0-debug.apk`。
+- 可安装测试包：`dist/DailyTraffic-0.2.0-debug.apk`。
 
 本次已完成的本机验证：
 
-- `.\gradlew.bat test`：8 个测试通过。
+- `.\gradlew.bat test`：10 个测试通过。
 - `.\gradlew.bat lintDebug assembleDebug assembleRelease`：通过。
-- API 36.1 模拟器：未授权页、授权后读取真实系统数据、前一天切换、应用名称/图标
-  映射均正常，无崩溃。
-- Debug APK：约 911 KiB；Release APK：约 37 KiB。
+- API 36.1 模拟器：未授权、授权读取、唯一 UID 直接显示、共享 UID 汇总到“其它”、
+  共享 UID 组与包名展开、七日趋势、网络筛选、帮助弹窗和前一天切换均正常。
+- Debug APK：约 961 KiB；Release APK：约 51 KiB。
 - 合并 Manifest：包含 `PACKAGE_USAGE_STATS`、`QUERY_ALL_PACKAGES`，不含
   `INTERNET`。
 - Debug APK 已用 Android Debug 证书签名，SHA-256：
-  `72FF095E95D9597F365D7BB2D171395A61AC3AEE7152D9EF29FA372CA22333E4`。
+  `2A26A72E002CA19AE7EAB14FB2717A1F0838A4DBF193C34BC0BFB03571FCE24F`。
 
 尚未完成：真机测试、厂商 ROM 兼容性和 API 23～28 运行验证。
 
@@ -37,6 +38,8 @@
 | 数据库 | 无 |
 | 网络 | 无 `INTERNET` |
 | 包可见性 | `QUERY_ALL_PACKAGES`，仅用于 UID 到本机应用名称/图标的映射 |
+| 共享 UID | 唯一 UID 直接显示；共享 UID 全部进入底部“其它”，可逐层展开 |
+| 七日趋势 | 按需查询、缓存；结束日为当前选中日期；只允许一个展开项 |
 | 依赖 | 仅 JUnit（测试）；运行时无第三方库 |
 | 构建 | AGP 8.13.2、Kotlin 2.3.10、Gradle 8.13 |
 | SDK | compile/target 36，min 23，JVM target 17 |
@@ -74,7 +77,9 @@ app/src/main/java/com/example/dailytraffic/
 ├── time/
 │   └── DayRangeProvider.kt
 ├── ui/
-│   └── TrafficListAdapter.kt
+│   ├── TrafficListAdapter.kt
+│   ├── TrafficUiState.kt
+│   └── UsageBarView.kt
 └── util/
     └── TrafficFormatter.kt
 
@@ -95,12 +100,24 @@ data class TrafficBytes(val rx: Long, val tx: Long) {
     val total: Long get() = rx + tx
 }
 
+enum class NetworkFilter { ALL, MOBILE, WIFI }
+
 data class TrafficRow(
     val uid: Int,
     val label: String,
     val packageNames: List<String>,
-    val bytes: TrafficBytes,
+    val mobileBytes: TrafficBytes,
+    val wifiBytes: TrafficBytes,
     val icon: Drawable?
+) {
+    fun bytesFor(filter: NetworkFilter): TrafficBytes
+}
+
+data class SharedUidGroup(
+    val uid: Int,
+    val packageNames: List<String>,
+    val mobileBytes: TrafficBytes,
+    val wifiBytes: TrafficBytes
 )
 
 data class DailyTraffic(
@@ -108,11 +125,17 @@ data class DailyTraffic(
     val dayEndMillis: Long,
     val deviceMobile: TrafficBytes,
     val deviceWifi: TrafficBytes,
-    val rows: List<TrafficRow>
-) {
-    val deviceTotal: Long
-        get() = deviceMobile.total + deviceWifi.total
-}
+    val appRows: List<TrafficRow>,
+    val sharedGroups: List<SharedUidGroup>
+)
+
+data class DailyUsagePoint(val dayStartMillis: Long, val bytes: TrafficBytes?)
+data class WeeklyUsage(
+    val uid: Int,
+    val endDayStartMillis: Long,
+    val filter: NetworkFilter,
+    val points: List<DailyUsagePoint>
+)
 
 sealed interface LoadState<out T> {
     data object Loading : LoadState<Nothing>
@@ -172,7 +195,8 @@ val end = if (isToday) minOf(now, nextStart) else nextStart
 - 按 `bucket.uid` 累加 `rxBytes + txBytes`；
 - 两个网络类型按 UID 取并集；
 - 过滤总字节为 0 的 UID；
-- 按总字节降序；
+- 唯一 UID 进入普通应用列表，按当前网络筛选值降序；
+- 共享 UID 不进入普通列表，单独按当前网络筛选值排序；
 - 同用量时按 label、uid 稳定排序。
 
 `NetworkStats` 必须关闭。不得捕获后返回伪造的成功 0。
@@ -184,9 +208,21 @@ val end = if (isToday) minOf(now, nextStart) else nextStart
 - `UID_REMOVED`：`已卸载应用`；
 - `Process.SYSTEM_UID`：尝试解析名称，否则 `系统 (UID n)`；
 - 其他无法映射 UID：`未知应用 (UID n)`；
-- 共享 UID：`多个应用 (n)`，通用图标。
+- 唯一 UID：直接显示应用名称和图标；
+- 共享 UID：全部合并到列表底部“其它”，不再显示“多个应用”；
+- “其它”展开后按共享 UID 分组，再点组显示包名和七日趋势。
 
 不要把特殊 UID 转成普通应用名，也不要静默丢弃。
+
+### 6.5 最近七日
+
+- 以当前选中日期为结束日，向前生成 7 个本地日区间。
+- 每天调用与主列表相同的 `querySummary`，再取目标 UID 的移动/Wi-Fi 数据；
+  不使用 `queryDetailsForUid`，因为实测系统 UID 可能返回全 0。
+- “全部网络”需要移动和 Wi-Fi 都成功；任一项失败，该天记为不可用并显示“—”。
+- `SecurityException` 终止七日加载并回到权限提示。
+- 结果按 `(uid, endDayStart, filter)` 缓存；切换日期或筛选时清空。
+- 当前只允许一个应用/共享 UID 组展开七日面板。
 
 ## 7. 权限
 
@@ -216,10 +252,11 @@ Intent(
 
 ## 8. 线程与生命周期
 
-- `NetworkStatsReader`、`PackageResolver` 和排序都在 `Executors.newSingleThreadExecutor()`。
+- `NetworkStatsDataSource`、`PackageResolver`、主数据加载和七日加载都在
+  `Executors.newSingleThreadExecutor()`。
 - UI 更新通过 `Handler(Looper.getMainLooper())` 或 `runOnUiThread`。
-- Activity 销毁时 `shutdownNow()`，并设置请求序号；旧请求结果不得覆盖新日期数据。
-- 每次刷新递增 `requestId`；回调只在 `requestId` 仍为当前值且页面未销毁时生效。
+- Activity 销毁时 `shutdownNow()`；主数据和七日各有请求序号，旧结果不得覆盖新状态。
+- 七日结果按 `(uid, endDayStart, filter)` 缓存；切换日期或网络筛选时清空。
 - 不捕获并吞掉 `InterruptedException`；线程退出时停止后续 UI 更新。
 
 ## 9. UI 行为
@@ -228,17 +265,24 @@ Intent(
 
 - 点击前一天/后一天：更新日期并刷新；后一天不能超过今天。
 - 点击日期：`DatePickerDialog`，最大日期为今天。
+- 漏斗：打开“全部网络 / 移动数据 / Wi-Fi”单选弹窗，只改变展示口径，不重新请求系统。
+- 帮助：打开说明弹窗，解释统计口径、共享 UID、七日趋势和历史保留限制。
 - 点击刷新：重新加载当前日期。
 - 加载时显示 `ProgressBar`，隐藏列表和错误文本。
 - 成功后隐藏状态面板，显示设备总流量和列表。
 - 权限不足时显示说明和“去授权”。
 - 读取失败时显示“读取失败，请稍后重试”，并提供刷新。
 - 列表为空时显示“当天无流量记录”；设备总流量仍可显示。
+- 唯一 UID 行点击后展开最近 7 日；共享 UID 的“其它”先展开 UID 组，再展开组内包名
+  和七日趋势。
+- 同一时间只展开一个应用或共享 UID 组；展开状态变化时保持当前列表滚动位置。
 
-列表行布局建议简单两行：
+列表行布局为：
 
-- 第一行：应用图标 + 名称；
-- 第二行：格式化后的总用量。
+- 左侧图标；
+- 中间名称和可选副标题；
+- 右侧当前筛选口径的总用量与展开箭头；
+- 展开区放在行下方，使用简单数字、横条和“—”表示缺失数据。
 
 不要显示图表、百分比、广告位、设置入口或关于入口。
 
@@ -265,7 +309,8 @@ Intent(
 - 移动/Wi-Fi 同 UID 合并；
 - 仅移动或仅 Wi-Fi 的 UID；
 - 0 用量过滤、降序和稳定排序；
-- 特殊 UID 标签；
+- 特殊 UID 与共享 UID 排序；
+- 网络筛选后的排序；
 - 格式化边界。
 
 查询层使用接口/fake 注入，单元测试不能依赖设备权限。
@@ -298,25 +343,28 @@ Release 检查：
 - 合并 Manifest 无 `INTERNET`；
 - 依赖树无广告/分析 SDK；
 - 记录实际 APK 大小；
+- 将可安装 Debug APK 复制到 `dist/`；
 - 不声称真机验证通过，除非确实在设备上运行并记录型号、Android 版本和结果。
 
 ## 13. 后续修复与真机验证
 
-- 真机安装：`adb install -r dist/DailyTraffic-0.1.0-debug.apk`。
+- 真机安装：`adb install -r dist/DailyTraffic-0.2.0-debug.apk`。
 - 首次打开后在系统设置中授予“使用情况访问”；USB 调试时可临时使用：
   `adb shell appops set com.example.dailytraffic GET_USAGE_STATS allow`。
 - 复现 bug 时记录设备品牌、Android 版本、系统 ROM 版本、所选日期、页面状态，
   并提供 `adb logcat -d` 中的崩溃栈。
-- 优先检查 `MainActivity` 的权限/日期状态、`DayRangeProvider` 时区边界、
-  `PackageResolver` 的 UID 映射和 `DailyTrafficRepository` 的异常映射。
-- 修改后必须重新运行 8 个 JVM 测试、`lintDebug`、Debug/Release 构建，并更新
+- 优先检查 `MainActivity` 的权限/日期/筛选/展开状态、`DayRangeProvider` 时区边界、
+  `PackageResolver` 的共享 UID 判断和 `DailyTrafficRepository` 的七日查询。
+- 修改后必须重新运行 10 个 JVM 测试、`lintDebug`、Debug/Release 构建，并更新
   `dist/` 中的测试 APK。
 - 当前 APK 使用 Android Debug 证书签名。后续若继续覆盖安装，必须继续使用同一
   Debug 证书；否则需先卸载旧版本。
 
 ## 14. 完成标准
 
-- 单页可切换日期并显示设备总量与按应用明细；
+- 单页可切换日期并显示设备总量、网络筛选和按应用明细；
+- 唯一 UID 直接显示；共享 UID 只出现在底部“其它”，可逐层展开；
+- 应用和共享 UID 可以按需展开最近 7 日；
 - 权限、失败、空数据和真实零流量可区分；
 - 所有查询在 UI 线程外；
 - JVM 测试和 Debug/Release 构建通过；

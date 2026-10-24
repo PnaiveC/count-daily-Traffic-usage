@@ -10,7 +10,8 @@ import com.example.dailytraffic.R
 data class ResolvedUid(
     val label: String,
     val packageNames: List<String>,
-    val icon: Drawable?
+    val icon: Drawable?,
+    val isSharedUid: Boolean
 )
 
 class PackageResolver(context: Context) {
@@ -23,28 +24,32 @@ class PackageResolver(context: Context) {
             return ResolvedUid(
                 appContext.getString(R.string.uid_all),
                 emptyList(),
-                defaultIcon
+                defaultIcon,
+                false
             )
         }
         if (uid == NetworkStats.Bucket.UID_TETHERING) {
             return ResolvedUid(
                 appContext.getString(R.string.uid_tethering),
                 emptyList(),
-                defaultIcon
+                defaultIcon,
+                false
             )
         }
         if (uid == NetworkStats.Bucket.UID_REMOVED) {
             return ResolvedUid(
                 appContext.getString(R.string.uid_removed),
                 emptyList(),
-                defaultIcon
+                defaultIcon,
+                false
             )
         }
         if (uid < 0) {
             return ResolvedUid(
                 appContext.getString(R.string.uid_system_entry, uid),
                 emptyList(),
-                defaultIcon
+                defaultIcon,
+                false
             )
         }
 
@@ -63,14 +68,15 @@ class PackageResolver(context: Context) {
             } else {
                 appContext.getString(R.string.uid_unknown, uid)
             }
-            return ResolvedUid(label, emptyList(), defaultIcon)
+            return ResolvedUid(label, emptyList(), defaultIcon, false)
         }
 
         if (packageNames.size > 1) {
             return ResolvedUid(
-                appContext.getString(R.string.uid_multiple_apps, packageNames.size),
+                appContext.getString(R.string.shared_uid_title, packageNames.size),
                 packageNames,
-                defaultIcon
+                defaultIcon,
+                true
             )
         }
 
@@ -85,11 +91,11 @@ class PackageResolver(context: Context) {
             } catch (_: RuntimeException) {
                 defaultIcon
             }
-            ResolvedUid(label, packageNames, icon)
+            ResolvedUid(label, packageNames, icon, false)
         } catch (_: PackageManager.NameNotFoundException) {
-            ResolvedUid(packageName, packageNames, defaultIcon)
+            ResolvedUid(packageName, packageNames, defaultIcon, false)
         } catch (_: RuntimeException) {
-            ResolvedUid(packageName, packageNames, defaultIcon)
+            ResolvedUid(packageName, packageNames, defaultIcon, false)
         }
     }
 }
